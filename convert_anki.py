@@ -23,46 +23,43 @@ from rich.console import Console
 # ⚙️ SYSTEM CONFIGURATION (TÙY CHỈNH Ở ĐÂY)
 # ==========================================
 
-
 # ==========================================
-# 🧠 ALL MODELS RATE LIMIT CONFIGURATION (TỪ ẢNH CỦA BẠN)
+# 🧠 ALL MODELS RATE LIMIT CONFIGURATION
 # ==========================================
-# Ghi chú: TPM của Gemma 4 báo "Unlimited", ta set 999999 để logic code không bị vướng
 GEMINI_MODELS_CONFIG = {
     # 👑 NHÓM GEMINI (Thông minh nhất, tuân thủ JSON 100%, gánh team chính)
     "gemini-3.1-flash-lite-preview":    {"RPM": 15, "TPM": 250000, "RPD": 500},
-    "gemini-2.5-flash-lite-preview":    {"RPM": 10, "TPM": 250000, "RPD": 20},
+    "gemini-2.5-flash-lite":    {"RPM": 10, "TPM": 250000, "RPD": 20},
     "gemini-3-flash-preview":           {"RPM": 5,  "TPM": 250000, "RPD": 20},
     "gemini-2.5-flash-preview":         {"RPM": 5,  "TPM": 250000, "RPD": 20},
 
     # 🚀 NHÓM GEMMA 4 (Độ thông minh tốt, TPM không giới hạn, Quota RPD ngon)
-    "gemma-4-31b":              {"RPM": 15, "TPM": 999999, "RPD": 1500},
-    "gemma-4-26b":              {"RPM": 15, "TPM": 999999, "RPD": 1500},
+    "gemma-4-31b-it":              {"RPM": 15, "TPM": 999999, "RPD": 1500},
+    "gemma-4-26b-a4b-it":              {"RPM": 15, "TPM": 999999, "RPD": 1500},
 
-    # 🚜 NHÓM GEMMA 3 (Cày cuốc siêu trâu bò, nhưng TPM 15K cực thấp)
-    "gemma-3-27b":              {"RPM": 30, "TPM": 15000,  "RPD": 14400},
-    "gemma-3-12b":              {"RPM": 30, "TPM": 15000,  "RPD": 14400},
+    # 🚜 NHÓM GEMMA 3 (Cày cuốc siêu trâu bò, nhưng TPM cực thấp)
+    "gemma-3-27b-it":              {"RPM": 30, "TPM": 15000,  "RPD": 14400},
+    "gemma-3-12b-it":              {"RPM": 30, "TPM": 15000,  "RPD": 14400},
     
-    # ⚠️ HÀNG KHUYẾN CÁO: Rất dễ vỡ cấu trúc JSON do model quá bé (Chỉ nên làm backup cuối)
-    "gemma-3-4b":               {"RPM": 30, "TPM": 15000,  "RPD": 14400},
-    "gemma-3-2b":               {"RPM": 30, "TPM": 15000,  "RPD": 14400},
-    "gemma-3-1b":               {"RPM": 30, "TPM": 15000,  "RPD": 14400}
+    # ⚠️ HÀNG KHUYẾN CÁO: Rất dễ vỡ cấu trúc JSON do model quá bé
+    "gemma-3-4b-it":               {"RPM": 30, "TPM": 15000,  "RPD": 14400},
+    "gemma-3-1b-it":               {"RPM": 30, "TPM": 15000,  "RPD": 14400},
+    "gemma-3-12b-it":               {"RPM": 30, "TPM": 15000,  "RPD": 14400}
 }
-
-CHUNK_SIZE = 5            
+### Giam ChunkSize de có best hiệu suất nhé
+CHUNK_SIZE = 1
 MAX_RETRIES_AI = 30       
 API_KEY_COOLDOWN = 5
 
 INPUT_EXCEL_FILE = "../Vocab_mountain_Writting.xlsm"
-SHEET_NAME = "Day 9"
-OUTPUT_CSV_FILE = "day9_turbo_absolute.csv"
+SHEET_NAME = "Day 5"
+OUTPUT_CSV_FILE = "day5_turbo_absolute.csv"
 
 console = Console()
 
 # ==========================================
 # 0. KHỞI TẠO GIAO DIỆN RICH (DASHBOARD)
 # ==========================================
-# 1. Global Progress
 global_progress = Progress(
     TextColumn("[bold blue]{task.description}"),
     BarColumn(bar_width=None, complete_style="white", finished_style="white"), 
@@ -73,7 +70,6 @@ global_progress = Progress(
 )
 global_task_id = global_progress.add_task("GLOBAL PROGRESS", total=100, visible=False)
 
-# 2. Thread Progress
 thread_progress = Progress(
     SpinnerColumn(),
     TextColumn("[bold green]{task.description}"),
@@ -83,23 +79,18 @@ thread_progress = Progress(
 )
 
 # 3. Key Progress (Cooldown)
+# 3. Key Progress (Cooldown)
 key_progress = Progress(
-    TextColumn("[bold yellow]{task.description}"),
-    BarColumn(complete_style="white", finished_style="white"),
-    TextColumn("{task.fields[avg_cd]}"), # Cột hiển thị Cooldown trung bình hiện tại
-    TextColumn("{task.fields[quota]}"), # 🟢 THÊM CỘT NÀY ĐỂ HIỂN THỊ QUOTA/RPM
-    TextColumn("{task.fields[stats]} {task.fields[status]}")
+    TextColumn("{task.description}"),
+    BarColumn(bar_width=None, complete_style="white", finished_style="white"), # BẮT BUỘC để số, không để None
+    TextColumn("{task.fields[stats]} {task.fields[status]}\n") # Thêm \n tàng hình ở đây để ép Bar lên dòng 1
 )
 
-# Bố cục chia Row và Column
 layout = Layout()
-layout.split_column(
-    Layout(name="header", size=5),
-    Layout(name="body")
-)
+layout.split_column(Layout(name="header", size=5), Layout(name="body"))
 layout["body"].split_row(
-    Layout(name="left"),
-    Layout(name="right")
+    Layout(name="left", ratio=1),  # Bên trái chiếm 1 phần
+    Layout(name="right", ratio=2)  # Bên phải chiếm 2 phần (Rộng gấp đôi để chứa chữ dài)
 )
 layout["header"].update(Panel(global_progress, title="🌟 TRẠNG THÁI TỔNG THỂ (GLOBAL)", border_style="blue"))
 layout["left"].update(Panel(thread_progress, title="⚙️ TIẾN ĐỘ THREADS (WORKERS)", border_style="green"))
@@ -120,6 +111,7 @@ def validate_and_load_keys():
         
     console.print(f"✅ [bold green]Loaded {len(all_keys)} keys (Skipped API validation to save quota).[/]")
     
+    # --- PHẦN HỎI YES/NO ĐƯỢC THÊM LẠI VÀO ĐÂY ---
     ans = console.input(f"\n❓ [bold cyan]Continue with {len(all_keys)} active keys? (yes/no): [/]")
     if ans.lower() not in ['y', 'yes']:
         console.print("👋 Exited program.")
@@ -131,53 +123,67 @@ def validate_and_load_keys():
 API_KEYS = validate_and_load_keys()
 
 class ModelRateTracker:
-    def __init__(self, limit_rpm, limit_tpm, limit_rpd, current_rpd):
+    def __init__(self, limit_rpm, limit_tpm, limit_rpd, saved_data):
         self.limit_rpm = limit_rpm
         self.limit_tpm = limit_tpm
         self.limit_rpd = limit_rpd
-        self.rpm_window = []  # Lưu timestamp
-        self.tpm_window = []  # Lưu (timestamp, tokens)
-        self.rpd_count = current_rpd
+        # Phục hồi dữ liệu từ JSON
+        if isinstance(saved_data, int):
+            # Nếu data cũ chỉ là 1 con số nguyên (RPD)
+            self.rpd_count = saved_data
+            self.rpm_window = []
+            self.tpm_window = []
+        else:
+            # Phục hồi dữ liệu từ JSON (Format mới)
+            self.rpd_count = saved_data.get("rpd", 0)
+            self.rpm_window = saved_data.get("rpm_window", [])  
+            self.tpm_window = saved_data.get("tpm_window", [])
 
     def is_available(self, current_time):
-        # 1. Đụng nóc ngày -> Cấm cửa vĩnh viễn hôm nay
         if self.rpd_count >= self.limit_rpd: return False
         
-        # 2. Dọn rác quá 60 giây
         self.rpm_window = [t for t in self.rpm_window if current_time - t < 75]
         self.tpm_window = [item for item in self.tpm_window if current_time - item[0] < 75]
         
-        # 3. Check chạm nóc Phút (trừ hao 1 đơn vị và 1000 tokens cho an toàn)
         if len(self.rpm_window) >= self.limit_rpm - 1: return False
         if sum(i[1] for i in self.tpm_window) >= self.limit_tpm - 1000: return False
-        
         return True
 
     def pre_register(self, current_time):
-        # Đặt gạch trước 1 slot và ước lượng 1000 tokens để Thread khác khỏi tranh
         self.rpm_window.append(current_time)
-        self.tpm_window.append((current_time, 1000))
+        self.tpm_window.append([current_time, 1000]) # Dùng list để dễ lưu JSON
 
     def record_actual_usage(self, current_time, actual_tokens):
-        # Cập nhật số token thực tế sau khi call xong và tăng RPD
         if self.tpm_window:
-            self.tpm_window[-1] = (current_time, actual_tokens)
+            self.tpm_window[-1] = [current_time, actual_tokens]
         self.rpd_count += 1
 
+    def to_dict(self):
+        current_time = time.time()
+        # Clean trước khi lưu để file json gọn gàng
+        self.rpm_window = [t for t in self.rpm_window if current_time - t < 75]
+        self.tpm_window = [item for item in self.tpm_window if current_time - item[0] < 75]
+        return {
+            "rpd": self.rpd_count,
+            "rpm_window": self.rpm_window,
+            "tpm_window": self.tpm_window
+        }
         
+    
 class KeyManager:
     def __init__(self, keys_info):
         self.keys_info = keys_info 
         self.lock = threading.Lock()
         
-        # --- 1. SETUP MODEL QUOTA & JSON FILE ---
+        # --- 1. SETUP MODEL QUOTA & JSON FILE THEO NGÀY ---
         self.today_str = datetime.datetime.now().strftime("%Y-%m-%d")
         self.rpd_data = self._load_rpd()
+        
+        # Reset file JSON nếu chuyển ngày
         if self.today_str not in self.rpd_data:
-            self.rpd_data[self.today_str] = {}
+            self.rpd_data = {self.today_str: {}}
             
         self.model_names_list = list(GEMINI_MODELS_CONFIG.keys())
-        self.global_model_index = 0
         self.active_model_display = {var_name: "Waiting..." for var_name, _ in keys_info}
 
         self.trackers = {}
@@ -185,11 +191,12 @@ class KeyManager:
             if var_name not in self.rpd_data[self.today_str]:
                 self.rpd_data[self.today_str][var_name] = {}
             self.trackers[var_name] = {}
+            
             for m_name, m_cfg in GEMINI_MODELS_CONFIG.items():
-                current_rpd = self.rpd_data[self.today_str][var_name].get(m_name, 0)
-                self.trackers[var_name][m_name] = ModelRateTracker(m_cfg["RPM"], m_cfg["TPM"], m_cfg["RPD"], current_rpd)
+                saved_data = self.rpd_data[self.today_str][var_name].get(m_name, {})
+                self.trackers[var_name][m_name] = ModelRateTracker(m_cfg["RPM"], m_cfg["TPM"], m_cfg["RPD"], saved_data)
 
-        # --- 2. THUẬT TOÁN COOLDOWN (Giữ nguyên WMA chuẩn) ---
+        # --- 2. THUẬT TOÁN COOLDOWN ---
         self.current_cd = {var_name: float(API_KEY_COOLDOWN) for var_name, _ in keys_info}
         self.cooldown_until = {var_name: 0.0 for var_name, _ in keys_info}
         self.last_success_time = {var_name: 0.0 for var_name, _ in keys_info}
@@ -204,9 +211,9 @@ class KeyManager:
         # --- 3. UI INIT ---
         self.key_tasks = {}
         for var_name, _ in keys_info:
+            desc = f"[bold yellow]{var_name:<20}[/]\n   [dim]└─[/] [dim]Khởi động...[/]"
             self.key_tasks[var_name] = key_progress.add_task(
-                var_name, total=self.current_cd[var_name], status="[green]Ready", 
-                stats="[cyan][0/0]", avg_cd=f"CD: {self.current_cd[var_name]:.1f}s", quota="[dim]Khởi động...[/]"
+                desc, total=self.current_cd[var_name], status="[green]Ready", stats="[cyan][0/0]"
             )
 
     def _load_rpd(self):
@@ -218,51 +225,62 @@ class KeyManager:
 
     def _save_rpd(self):
         try:
-            with open("rpd_tracker.json", "w") as f: json.dump(self.rpd_data, f, indent=4)
+            # Sync trackers to dictionary before saving
+            for var_name, _ in self.keys_info:
+                for m_name in self.model_names_list:
+                    self.rpd_data[self.today_str][var_name][m_name] = self.trackers[var_name][m_name].to_dict()
+            with open("rpd_tracker.json", "w") as f: 
+                json.dump(self.rpd_data, f, indent=4)
         except: pass
 
     def get_next_key_model(self):
         while True:
             with self.lock:
                 current_time = time.time()
-                current_global_model = self.model_names_list[self.global_model_index]
                 
-                selected_var, selected_key = None, None
-                shortest_wait = float('inf')
-                all_keys_exhausted_rpd = True # Biến kiểm tra xem cả 14 keys đã cạn RPD chưa
-
-                for var_name, key in self.keys_info:
-                    tracker = self.trackers[var_name][current_global_model]
-                    
-                    if tracker.rpd_count < tracker.limit_rpd:
-                        all_keys_exhausted_rpd = False # Vẫn còn ít nhất 1 key chưa kiệt sức hôm nay
-                        
-                        if current_time < self.cooldown_until[var_name]:
-                            wait_t = self.cooldown_until[var_name] - current_time
-                            if wait_t < shortest_wait: shortest_wait = wait_t
-                            continue
-
-                        if tracker.is_available(current_time):
-                            selected_var, selected_key = var_name, key
+                # --- BƯỚC 1: KIỂM TRA TỔNG THỂ RPD ---
+                # Chỉ cần 1 key còn 1 model chưa chạm trần RPD là hệ thống chưa "hết cứu"
+                all_exhausted = True
+                for v_name, _ in self.keys_info:
+                    for m_name in self.model_names_list:
+                        if self.trackers[v_name][m_name].rpd_count < self.trackers[v_name][m_name].limit_rpd:
+                            all_exhausted = False
                             break
+                    if not all_exhausted:
+                        break
+                        
+                if all_exhausted:
+                    console.print("\n🛑 [bold red]HẾT CỨU! TOÀN BỘ KEYS ĐÃ DÙNG CẠN SẠCH QUOTA CỦA TẤT CẢ MODELS HÔM NAY![/]")
+                    os._exit(1)
 
+                # --- BƯỚC 2: TÌM KEY & MODEL ĐỂ CHẠY ---
+                selected_var, selected_key, selected_model = None, None, None
+                for var_name, key in self.keys_info:
+                    # Bỏ qua nếu key đang ăn gậy 429 hoặc cooldown delay ngắn hạn
+                    if current_time < self.cooldown_until[var_name]:
+                        continue
+                        
+                    # Thuật toán nhảy model: Duyệt ưu tiên từ trên xuống dưới
+                    for m_name in self.model_names_list:
+                        tracker = self.trackers[var_name][m_name]
+                        if tracker.is_available(current_time):
+                            selected_var, selected_key, selected_model = var_name, key, m_name
+                            break
+                            
+                    if selected_var:
+                        break
+
+                # --- BƯỚC 3: GIAO VIỆC ---
                 if selected_var:
-                    # Giao nhiệm vụ thành công
-                    self.trackers[selected_var][current_global_model].pre_register(current_time)
+                    # Chốt đơn, xí chỗ và lưu JSON lập tức
+                    self.trackers[selected_var][selected_model].pre_register(current_time)
                     self.cooldown_until[selected_var] = current_time + self.current_cd[selected_var]
-                    self.active_model_display[selected_var] = current_global_model
-                    return selected_var, selected_key, current_global_model
+                    self.active_model_display[selected_var] = selected_model
+                    self._save_rpd()
+                    return selected_var, selected_key, selected_model
 
-                if all_keys_exhausted_rpd:
-                    # THỜI KHẮC CHUYỂN MODEL: Tất cả 14 keys đều hết RPD cho model này!
-                    self.global_model_index += 1
-                    if self.global_model_index >= len(self.model_names_list):
-                        console.print("\n🛑 [bold red]HẾT CỨU! TOÀN BỘ KEYS ĐÃ DÙNG CẠN SẠCH QUOTA CỦA TẤT CẢ MODELS HÔM NAY![/]")
-                        os._exit(1)
-                    continue # Quay lại vòng lặp với model mới ngay lập tức
-
-            # Nếu kẹt do RPM/TPM thì ráng đợi 1 giây rồi check lại
-            time.sleep(min(1.0, shortest_wait if shortest_wait != float('inf') else 1.0))
+            # Đợi 0.5 giây nếu tất cả các key đều đang kẹt RPM/TPM/Cooldown tạm thời
+            time.sleep(0.5)
 
     def record_success(self, var_name, model_name, duration, tokens):
         with self.lock:
@@ -272,7 +290,6 @@ class KeyManager:
             if self.consecutive_successes[var_name] >= 2:
                 self.consecutive_429[var_name] = 0 
             
-            # --- WMA Tính trung bình chính xác dựa trên lần thành công ---
             safe_duration = min(duration, 60.0) 
             self.recent_durations[var_name].append(safe_duration)
             if len(self.recent_durations[var_name]) > self.window_size:
@@ -286,55 +303,89 @@ class KeyManager:
                 
             self.last_success_time[var_name] = current_time
 
-            # Update Model Quota & Save Backup
+            # Cập nhật usage chuẩn xác và Save
             self.trackers[var_name][model_name].record_actual_usage(current_time, tokens)
-            self.rpd_data[self.today_str][var_name][model_name] = self.trackers[var_name][model_name].rpd_count
             self._save_rpd()
 
-    def penalize_key(self, var_name):
+    def penalize_key(self, var_name, model_name):
         with self.lock:
+            # 1. Tăng số đếm gậy 429, reset chuỗi thành công
             self.consecutive_successes[var_name] = 0
             self.consecutive_429[var_name] += 1
+            
+            # 2. Thuật toán Phạt lũy tiến (Exponential Backoff)
+            # Lần 1 phạt 5s, Lần 2 phạt 10s, Lần 3 phạt 20s... (Tối đa 60s)
             backoff_time = min(60.0, 5.0 * (2 ** (self.consecutive_429[var_name] - 1)))
             target_time = time.time() + backoff_time
+            
+            # Khóa Key không cho gọi trong khoảng thời gian bị phạt
             self.cooldown_until[var_name] = target_time
             self.ui_ban_until[var_name] = target_time
-
+            
     def record_attempt(self, var_name):
         with self.lock: self.stats[var_name]['total'] += 1
 
     def update_ui(self):
+        from rich.console import Group
+        from rich.table import Table
+        from rich.progress_bar import ProgressBar
+        
         current_time = time.time()
+        all_keys_ui = [] # Danh sách chứa giao diện của từng API
+        
         for var_name, _ in self.keys_info:
-            task_id = self.key_tasks[var_name]
             active_m = self.active_model_display[var_name]
             
-            # Tính toán Quota hiển thị UI
+            # --- Tính thông số Quota ---
             if active_m in self.trackers[var_name]:
                 tr = self.trackers[var_name][active_m]
                 rpm_used = len([t for t in tr.rpm_window if current_time - t < 60])
-                quota_str = f"[bold yellow]{active_m}[/] | [bold blue]RPM: {rpm_used}/{tr.limit_rpm}[/] | [bold magenta]RPD: {tr.rpd_count}/{tr.limit_rpd}[/]"
+                quota_str = f"[bold blue]RPM: {rpm_used}/{tr.limit_rpm}[/] | [bold magenta]RPD: {tr.rpd_count}/{tr.limit_rpd}[/]"
             else:
                 quota_str = "[dim]Waiting...[/]"
 
-            # Xử lý thanh hiển thị
+            # --- Tính thông số Cooldown ---
             if self.consecutive_429[var_name] > 0: current_active_cd = min(60.0, 5.0 * (2 ** (self.consecutive_429[var_name] - 1)))
             else: current_active_cd = self.current_cd[var_name]
                 
             remaining = self.cooldown_until[var_name] - current_time
             s, t = self.stats[var_name]['success'], self.stats[var_name]['total']
-            stats_str, avg_str = f"[bold cyan][{s}/{t}][/]", f"[magenta]Avg: {self.current_cd[var_name]:.1f}s[/]"
+            stats_str = f"[bold cyan][{s}/{t}][/]"
+            avg_str = f"[magenta]Avg: {self.current_cd[var_name]:.1f}s[/]"
             
             if remaining > 0:
                 display_rem = min(remaining, current_active_cd) if current_active_cd > 0 else remaining
                 completed = current_active_cd - display_rem
                 ban_remaining = self.ui_ban_until[var_name] - current_time
-                if self.consecutive_429[var_name] > 0 and ban_remaining > 0: status_text = f"[bold red]Banned {ban_remaining:.1f}s"
-                else: status_text = f"[red]Wait {remaining:.1f}s"
-                
-                key_progress.update(task_id, total=current_active_cd, completed=completed, status=status_text, stats=stats_str, avg_cd=avg_str, quota=quota_str)
+                if self.consecutive_429[var_name] > 0 and ban_remaining > 0: 
+                    status_text = f"[bold red]Banned {ban_remaining:.1f}s[/]"
+                else: 
+                    status_text = f"[red]Wait {remaining:.1f}s[/]"
             else:
-                key_progress.update(task_id, total=self.current_cd[var_name], completed=self.current_cd[var_name], status="[green]Ready", stats=stats_str, avg_cd=avg_str, quota=quota_str)
+                completed = current_active_cd
+                status_text = "[green]Ready[/]"
+            
+            # 🟢 VẼ UI MỚI: PHÁ VỠ "BỨC TƯỜNG TÀNG HÌNH"
+            total_cd = current_active_cd if current_active_cd > 0 else 1
+            
+            # Tầng 1: Vẽ Table ép 3 cột (Tên API | Thanh Bar giãn tự do | Status)
+            t1 = Table(show_header=False, box=None, padding=(0, 1), expand=True)
+            t1.add_column(width=26, no_wrap=True) # Ép cứng Tên API đúng 26 ký tự cho thẳng hàng
+            t1.add_column(justify="center")       # Cột chứa Bar (Để trống width để nó dài đụng tên API)
+            t1.add_column(justify="right", no_wrap=True) 
+            
+            display_name = f"[bold yellow]{var_name[:26]}[/]"
+            bar = ProgressBar(total=total_cd, completed=completed, complete_style="white", finished_style="white")
+            t1.add_row(display_name, bar, f"{stats_str} {status_text}")
+            
+            # Tầng 2: Dòng thông số Model hoàn toàn độc lập, không bị ép chung cột với Tầng 1
+            t2 = f"   [dim]└─[/] [yellow]{active_m}[/] | {quota_str} | {avg_str}\n"
+            
+            # Đóng gói Tầng 1 và Tầng 2 lại thành 1 Group
+            all_keys_ui.append(Group(t1, t2))
+            
+        # Ghi đè toàn bộ giao diện bên phải bằng mảng UI mới vẽ xong
+        layout["right"].update(Panel(Group(*all_keys_ui), title="🔑 API KEY COOLDOWN", border_style="yellow"))
 
 key_pool = KeyManager(API_KEYS)
 
@@ -349,7 +400,6 @@ def load_checkpoint(output_csv):
         console.print(f"📂 Found existing checkpoint: '{os.path.basename(output_csv)}'. Verifying data integrity...")
         try:
             df_existing = pd.read_csv(output_csv)
-            
             required_cols = ["target_word", "ipa", "vietnamese_meaning", "english_definition", "part_of_speech", "example_front", "example_back", "example_vietnamese_translation"]
             for col in required_cols:
                 if col not in df_existing.columns:
@@ -358,14 +408,12 @@ def load_checkpoint(output_csv):
             valid_count = 0
             for _, row in df_existing.iterrows():
                 word = str(row.get('target_word', '')).strip().lower()
-                print(f"🔍 Checking word: '{word}'...")
                 if not word or word == 'nan': continue
 
                 is_complete = True
                 for col in ["english_definition", "part_of_speech", "example_front", "example_back", "example_vietnamese_translation"]:
                     val = str(row.get(col, '')).strip()
                     if not val or val.lower() in ['nan', 'none', 'null', 'n/a', 'empty']:
-                        print(f"⚠️ Incomplete data for word '{word}' in column '{col}'. This entry will be reprocessed.")
                         is_complete = False
                         break
 
@@ -396,7 +444,6 @@ def call_gemini_api_raw(prompt, api_key, model_name):
         "generationConfig": {}
     }
     
-    # Chỉ ép strict JSON nếu là dòng họ nhà Gemini
     if "gemini" in model_name.lower():
         payload["generationConfig"]["responseMimeType"] = "application/json"
         
@@ -417,9 +464,7 @@ def call_gemini_api_raw(prompt, api_key, model_name):
     except Exception as e:
         raise ValueError(f"Unexpected JSON structure: {e}")
 
-    # 🟢 Lấy chính xác Token Usage để quản lý TPM
     tokens = data.get('usageMetadata', {}).get('totalTokenCount', 1000)
-    
     return raw_text.strip(), tokens
 
 def is_valid_ai_result(res_dict):
@@ -466,14 +511,11 @@ def enrich_chunk_with_multi_keys(chunk, thread_task_id):
         
         try:
             start_api_time = time.time()
-            # TRUYỀN THÊM TÊN MODEL VÀO HÀM API
             raw_text, used_tokens = call_gemini_api_raw(prompt, current_key, current_model)
             api_duration = time.time() - start_api_time 
             
-            # GHI NHẬN THÀNH CÔNG VỚI ĐỦ CÁC THÔNG SỐ TOKEN VÀ MODEL
             key_pool.record_success(var_name, current_model, api_duration, used_tokens)
 
-            # 2. XỬ LÝ DATA (Nếu có lỗi parse JSON ở đây thì API vẫn đã được tính là gọi thành công)
             if raw_text.startswith("```json"):
                 raw_text = raw_text[7:]
             elif raw_text.startswith("```"):
@@ -483,7 +525,6 @@ def enrich_chunk_with_multi_keys(chunk, thread_task_id):
                 
             results_list = json.loads(raw_text.strip())
             
-            # 3. VALIDATE VÀ LƯU KẾT QUẢ
             for res in results_list:
                 w_key = res.get("word", "").strip().lower()
                 if w_key in [m['word'].strip().lower() for m in missing_items]:
@@ -496,19 +537,17 @@ def enrich_chunk_with_multi_keys(chunk, thread_task_id):
         except requests.exceptions.HTTPError as err:
             status_code = err.response.status_code
             if status_code == 429:
-                thread_progress.update(thread_task_id, status="[red]Rate Limited! Penalty active[/]")
-                key_pool.penalize_key(var_name)
+                thread_progress.update(thread_task_id, status="[red]Bị Rate Limit! Ép nhảy Model...[/]")
+                # 🟢 SỬA DÒNG NÀY: Truyền thêm current_model vào
+                key_pool.penalize_key(var_name, current_model)
             else:
-                try:
-                    error_msg = err.response.json().get('error', {}).get('message', 'Unknown Error')
-                except:
-                    error_msg = str(err)
+                try: error_msg = err.response.json().get('error', {}).get('message', 'Unknown Error')
+                except: error_msg = str(err)
                 thread_progress.update(thread_task_id, status=f"[bold red]API Error {status_code}: {error_msg[:30]}...[/]")
             time.sleep(2) 
         except json.decoder.JSONDecodeError:
             thread_progress.update(thread_task_id, status="[bold red]Lỗi Code: AI trả JSON sai định dạng![/]")
             time.sleep(2)
-        # BỔ SUNG: Bắt lỗi bóc tách JSON (ValueError từ call_gemini_api_raw)
         except ValueError as ve:
             thread_progress.update(thread_task_id, status=f"[bold yellow]Model Alert: {str(ve)[:40]}...[/]")
             time.sleep(2)
@@ -517,6 +556,7 @@ def enrich_chunk_with_multi_keys(chunk, thread_task_id):
             time.sleep(2)
 
     return accumulated_results
+
 # ==========================================
 # 4. WORKER THREAD MANAGER
 # ==========================================
@@ -534,7 +574,6 @@ def process_chunk(chunk_items):
         task_id = worker_tasks[worker_id]
         
     thread_progress.update(task_id, completed=0, total=len(chunk_items), status="[cyan]Processing AI...")
-
     ai_results_dict = enrich_chunk_with_multi_keys(chunk_items, task_id)
     
     thread_progress.update(task_id, status="[cyan]Formatting...")
@@ -604,14 +643,14 @@ def process_sheet(df, output_csv):
                 })
 
     total_missing = len(items_to_process)
-    print(f"🔍 Items to process: {items_to_process}")
+    print(f"Missing words: {items_to_process}")
     if total_missing == 0:
         console.print("🎉 [bold green]All words are already 100% completed in the CSV. Nothing left to do![/]")
         return all_results
 
     chunks = [items_to_process[i:i + CHUNK_SIZE] for i in range(0, total_missing, CHUNK_SIZE)]
 
-    console.print(f"🚀 [bold magenta]STARTING TURBO MODE: {max_workers} Workers processing {total_missing} missing words...[/]")
+    console.print(f"🚀 [bold magenta]STARTING ABSOLUTE SPEED MODE: {max_workers} Workers processing {total_missing} missing words...[/]")
     time.sleep(1)
 
     with Live(layout, refresh_per_second=10):
@@ -623,7 +662,6 @@ def process_sheet(df, output_csv):
 
                 while futures:
                     key_pool.update_ui()
-                    
                     done, not_done = concurrent.futures.wait(futures, timeout=0.1)
                     for future in done:
                         try:
@@ -637,7 +675,6 @@ def process_sheet(df, output_csv):
                             futures.remove(future)
 
         except Exception as exc:
-            # Thay chữ 'pass' bằng dòng dưới đây để soi lỗi
             console.print(f"\n❌ [bold red]CRASH TRONG LUỒNG: {exc}[/]")
 
     console.print("\n" + "="*50)
