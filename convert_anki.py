@@ -21,7 +21,34 @@ from rich.console import Console
 # ==========================================
 # ⚙️ SYSTEM CONFIGURATION (TÙY CHỈNH Ở ĐÂY)
 # ==========================================
-MODEL_NAME = "gemini-3-flash-preview"
+
+
+# ==========================================
+# 🧠 ALL MODELS RATE LIMIT CONFIGURATION (TỪ ẢNH CỦA BẠN)
+# ==========================================
+# Ghi chú: TPM của Gemma 4 báo "Unlimited", ta set 999999 để logic code không bị vướng
+GEMINI_MODELS_CONFIG = {
+    # 👑 NHÓM GEMINI (Thông minh nhất, tuân thủ JSON 100%, gánh team chính)
+    "gemini-3.1-flash-lite":    {"RPM": 15, "TPM": 250000, "RPD": 500},
+    "gemini-2.5-flash-lite":    {"RPM": 10, "TPM": 250000, "RPD": 20},
+    "gemini-3-flash":           {"RPM": 5,  "TPM": 250000, "RPD": 20},
+    "gemini-2.5-flash":         {"RPM": 5,  "TPM": 250000, "RPD": 20},
+
+    # 🚀 NHÓM GEMMA 4 (Độ thông minh tốt, TPM không giới hạn, Quota RPD ngon)
+    "gemma-4-31b":              {"RPM": 15, "TPM": 999999, "RPD": 1500},
+    "gemma-4-26b":              {"RPM": 15, "TPM": 999999, "RPD": 1500},
+
+    # 🚜 NHÓM GEMMA 3 (Cày cuốc siêu trâu bò, nhưng TPM 15K cực thấp)
+    "gemma-3-27b":              {"RPM": 30, "TPM": 15000,  "RPD": 14400},
+    "gemma-3-12b":              {"RPM": 30, "TPM": 15000,  "RPD": 14400},
+    
+    # ⚠️ HÀNG KHUYẾN CÁO: Rất dễ vỡ cấu trúc JSON do model quá bé (Chỉ nên làm backup cuối)
+    "gemma-3-4b":               {"RPM": 30, "TPM": 15000,  "RPD": 14400},
+    "gemma-3-2b":               {"RPM": 30, "TPM": 15000,  "RPD": 14400},
+    "gemma-3-1b":               {"RPM": 30, "TPM": 15000,  "RPD": 14400}
+}
+
+MODEL_NAME = "gemini-2.5-flash"
 CHUNK_SIZE = 5            
 MAX_RETRIES_AI = 30       
 API_KEY_COOLDOWN = 5
@@ -116,7 +143,11 @@ class KeyManager:
         self.stats = {var_name: {'total': 0, 'success': 0} for var_name, _ in keys_info}
         
         # BỘ ĐẾM ÁN PHẠT: Đếm số lần dính 429 liên tiếp
+        self.consecutive_successes = {var_name: 0 for var_name, _ in keys_info} 
+        self.ui_ban_until = {var_name: 0.0 for var_name, _ in keys_info}
+        self.window_size = 3
         self.consecutive_429 = {var_name: 0 for var_name, _ in keys_info}
+        self.recent_durations = {var_name: [] for var_name, _ in keys_info}
 
         # Thêm biến lưu trữ Rate Limits và token usage
         self.rate_limits = {var_name: {'remaining': '?', 'limit': '?', 'tokens': 'N/A'} for var_name, _ in keys_info}
@@ -157,28 +188,42 @@ class KeyManager:
         with self.lock:
             current_time = time.time()
             self.stats[var_name]['success'] += 1
+            self.consecutive_successes[var_name] += 1
             
-            # 1. Xóa "án tích" vì đã thành công
-            self.consecutive_429[var_name] = 0 
+            # Gỡ án phạt sau 2 lần thành công liên tiếp
+            if self.consecutive_successes[var_name] >= 2:
+                self.consecutive_429[var_name] = 0 
             
-            # 2. Tính toán nhịp độ (EMA) DỰA TRÊN LẦN THỬ THÀNH CÔNG
-            # Bỏ qua thời gian kẹt do lỗi, chỉ lấy tốc độ phản hồi thực tế của AI
-            # Chặn trần ở mức 60s để tránh nhiễu do mạng giật lag đột xuất
-            safe_duration = min(duration, 60.0)
-            self.current_cd[var_name] = (self.current_cd[var_name] * 0.7) + (safe_duration * 0.3)
+            # 🟢 TÍNH TRUNG BÌNH THEO ROLLING WINDOW (Chỉ áp dụng cho lần thành công)
+            safe_duration = min(duration, 60.0) # Chặn trần tránh nhiễu do lag đột biến
+            
+            # Thêm kết quả mới vào mảng
+            self.recent_durations[var_name].append(safe_duration)
+            if len(self.recent_durations[var_name]) > self.window_size:
+                self.recent_durations[var_name].pop(0)
+                
+            # 🟢 TÍNH TRUNG BÌNH CÓ TRỌNG SỐ (Ưu tiên kết quả mới nhất)
+            durations = self.recent_durations[var_name]
+            n = len(durations)
+            if n == 3:
+                self.current_cd[var_name] = (durations[0]*1 + durations[1]*2 + durations[2]*3) / 6.0
+            elif n == 2:
+                self.current_cd[var_name] = (durations[0]*1 + durations[1]*2) / 3.0
+            else:
+                self.current_cd[var_name] = durations[0]
                 
             self.last_success_time[var_name] = current_time
 
     def penalize_key(self, var_name):
         with self.lock:
-            # 1. Tăng án tích
+            self.consecutive_successes[var_name] = 0
             self.consecutive_429[var_name] += 1
-            
-            # 2. Tính thời gian phạt: 5s -> 10s -> 20s -> 40s (Tối đa 60s)
             backoff_time = min(60.0, 5.0 * (2 ** (self.consecutive_429[var_name] - 1)))
             
-            # 3. Ép chờ theo án phạt (Không làm hỏng nhịp độ trung bình EMA)
-            self.cooldown_until[var_name] = time.time() + backoff_time
+            # Cập nhật cả thời gian khóa của Thread và thời gian hiển thị UI
+            target_time = time.time() + backoff_time
+            self.cooldown_until[var_name] = target_time
+            self.ui_ban_until[var_name] = target_time # 🟢 Cập nhật cho UI
 
     def record_attempt(self, var_name):
         with self.lock: 
@@ -218,8 +263,10 @@ class KeyManager:
                 display_rem = min(remaining, current_active_cd) if current_active_cd > 0 else remaining
                 completed = current_active_cd - display_rem
                 
-                if self.consecutive_429[var_name] > 0:
-                    status_text = f"[bold red]Banned {remaining:.1f}s"
+                # 🟢 Dùng ui_ban_until để hiển thị chính xác thời gian phạt
+                ban_remaining = self.ui_ban_until[var_name] - current_time
+                if self.consecutive_429[var_name] > 0 and ban_remaining > 0:
+                    status_text = f"[bold red]Banned {ban_remaining:.1f}s"
                 else:
                     status_text = f"[red]Wait {remaining:.1f}s"
                 
@@ -292,10 +339,42 @@ def call_gemini_api_raw(prompt, api_key):
     response.raise_for_status() 
     
     data = response.json()
-    raw_text = data['candidates'][0]['content']['parts'][0]['text']
     
-    # 🟢 Đọc HTTP Headers. Các nền tảng khác nhau dùng tên biến khác nhau.
-    # Ta hứng cả quota/RPM và token usage nếu Gemini trả về.
+    # =======================================================
+    # 🛡️ CƠ CHẾ BÓC TÁCH JSON AN TOÀN CHO MỌI MODEL GEMINI
+    # =======================================================
+    raw_text = ""
+    try:
+        candidates = data.get('candidates', [])
+        if not candidates:
+            # Trường hợp model từ chối trả lời hoàn toàn (thường có promptFeedback)
+            feedback = data.get('promptFeedback', {})
+            raise ValueError(f"No candidates. Feedback: {feedback}")
+            
+        first_candidate = candidates[0]
+        
+        # Kiểm tra nếu phản hồi bị chặn bởi bộ lọc an toàn (Safety)
+        if 'content' not in first_candidate:
+            finish_reason = first_candidate.get('finishReason', 'UNKNOWN')
+            raise ValueError(f"Model stopped without content. Reason: {finish_reason}")
+            
+        parts = first_candidate.get('content', {}).get('parts', [])
+        
+        # Lấy an toàn tất cả các đoạn text và gộp lại (đề phòng model chia nhỏ)
+        texts = [part.get('text', '') for part in parts if isinstance(part, dict) and 'text' in part]
+        
+        if not texts:
+            raise ValueError("Response has content but no text parts.")
+            
+        raw_text = "".join(texts)
+        
+    except (AttributeError, TypeError) as e:
+        # Bắt lỗi cấu trúc JSON bị thay đổi hoàn toàn
+        raise ValueError(f"Unexpected JSON structure from model {MODEL_NAME}. Error: {e}")
+
+    # =======================================================
+    
+    # Đọc HTTP Headers để lấy Quota/Token Usage
     resp_headers = {k.lower(): v for k, v in response.headers.items()}
     rate_limit_info = {
         'remaining': resp_headers.get('x-ratelimit-remaining-requests', resp_headers.get('x-ratelimit-remaining', 'N/A')),
@@ -303,7 +382,7 @@ def call_gemini_api_raw(prompt, api_key):
         'tokens': resp_headers.get('x-request-cost', resp_headers.get('x-request-cost-usage', resp_headers.get('x-response-usage', 'N/A')))
     }
     
-    return raw_text.strip(), rate_limit_info # 🟢 Trả về 2 giá trị
+    return raw_text.strip(), rate_limit_info
 
 def is_valid_ai_result(res_dict):
     required_keys = ["english_definition", "part_of_speech", "example_front", "example_back", "example_vietnamese_translation"]
@@ -350,12 +429,14 @@ def enrich_chunk_with_multi_keys(chunk, thread_task_id):
         try:
             # 1. BẮM ĐẦU BÊN API THUẦN TÚY
             start_api_time = time.time()
-            raw_text = call_gemini_api_raw(prompt, current_key)
+            raw_text, rate_limit_info = call_gemini_api_raw(prompt, current_key)
             api_duration = time.time() - start_api_time # Chỉ tính thời gian của lần này
             
             # --- CHỐT THÀNH CÔNG NGAY TẠI ĐÂY ---
             # Truyền api_duration vào để tính trung bình
             key_pool.record_success(var_name, api_duration)
+
+            key_pool.rate_limits[var_name] = rate_limit_info
             
             # 2. XỬ LÝ DATA (Nếu có lỗi parse JSON ở đây thì API vẫn đã được tính là gọi thành công)
             if raw_text.startswith("```json"):
@@ -381,7 +462,6 @@ def enrich_chunk_with_multi_keys(chunk, thread_task_id):
             status_code = err.response.status_code
             if status_code == 429:
                 thread_progress.update(thread_task_id, status="[red]Rate Limited! Penalty active[/]")
-                # Phạt lỗi Rate Limit (Backoff)
                 key_pool.penalize_key(var_name)
             else:
                 try:
@@ -391,8 +471,11 @@ def enrich_chunk_with_multi_keys(chunk, thread_task_id):
                 thread_progress.update(thread_task_id, status=f"[bold red]API Error {status_code}: {error_msg[:30]}...[/]")
             time.sleep(2) 
         except json.decoder.JSONDecodeError:
-            # Bắt riêng lỗi parse JSON để dễ theo dõi
             thread_progress.update(thread_task_id, status="[bold red]Lỗi Code: AI trả JSON sai định dạng![/]")
+            time.sleep(2)
+        # BỔ SUNG: Bắt lỗi bóc tách JSON (ValueError từ call_gemini_api_raw)
+        except ValueError as ve:
+            thread_progress.update(thread_task_id, status=f"[bold yellow]Model Alert: {str(ve)[:40]}...[/]")
             time.sleep(2)
         except Exception as e:
             thread_progress.update(thread_task_id, status=f"[bold red]Lỗi Code: {type(e).__name__}[/]")
@@ -517,8 +600,9 @@ def process_sheet(df, output_csv):
                         finally:
                             futures.remove(future)
 
-        except KeyboardInterrupt:
-            pass 
+        except Exception as exc:
+            # Thay chữ 'pass' bằng dòng dưới đây để soi lỗi
+            console.print(f"\n❌ [bold red]CRASH TRONG LUỒNG: {exc}[/]")
 
     console.print("\n" + "="*50)
     if len(all_results) < len(items_to_process):
