@@ -6,85 +6,230 @@ import time
 import requests
 import threading
 import concurrent.futures
-from tqdm import tqdm
 from dotenv import dotenv_values
+
+# Import Rich thay cho tqdm
+from rich.live import Live
+from rich.layout import Layout
+from rich.panel import Panel
+from rich.progress import (
+    Progress, BarColumn, TextColumn, 
+    TimeElapsedColumn, TimeRemainingColumn, SpinnerColumn
+)
+from rich.console import Console
 
 # ==========================================
 # ⚙️ SYSTEM CONFIGURATION (TÙY CHỈNH Ở ĐÂY)
 # ==========================================
-# Cấu hình AI
 MODEL_NAME = "gemini-3-flash-preview"
-CHUNK_SIZE = 20          # Số lượng từ gửi đi trong 1 request (Tối đa tốc độ)
-MAX_RETRIES_AI = 30      # Số lần thử lại tối đa nếu AI trả thiếu field
+CHUNK_SIZE = 5            
+MAX_RETRIES_AI = 30       
+API_KEY_COOLDOWN = 5
 
-# Cấu hình File Đầu vào / Đầu ra
 INPUT_EXCEL_FILE = "../Vocab_mountain_Writting.xlsm"
-SHEET_NAME = "Day 7"
-OUTPUT_CSV_FILE = "day7_turbo_absolute.csv"
+SHEET_NAME = "Day 8"
+OUTPUT_CSV_FILE = "day8_turbo_absolute.csv"
+
+console = Console()
+
+# ==========================================
+# 0. KHỞI TẠO GIAO DIỆN RICH (DASHBOARD)
+# ==========================================
+# 1. Global Progress
+global_progress = Progress(
+    TextColumn("[bold blue]{task.description}"),
+    BarColumn(bar_width=None, complete_style="white", finished_style="white"), 
+    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+    TextColumn("[cyan]{task.completed}/{task.total} words"),
+    TimeElapsedColumn(),
+    TimeRemainingColumn()
+)
+global_task_id = global_progress.add_task("GLOBAL PROGRESS", total=100, visible=False)
+
+# 2. Thread Progress
+thread_progress = Progress(
+    SpinnerColumn(),
+    TextColumn("[bold green]{task.description}"),
+    BarColumn(complete_style="white", finished_style="white"),
+    TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+    TextColumn("{task.fields[status]}")
+)
+
+# 3. Key Progress (Cooldown)
+key_progress = Progress(
+    TextColumn("[bold yellow]{task.description}"),
+    BarColumn(complete_style="white", finished_style="white"),
+    TextColumn("{task.fields[avg_cd]}"), # Cột hiển thị Cooldown trung bình hiện tại
+    TextColumn("{task.fields[quota]}"), # 🟢 THÊM CỘT NÀY ĐỂ HIỂN THỊ QUOTA/RPM
+    TextColumn("{task.fields[stats]} {task.fields[status]}")
+)
+
+# Bố cục chia Row và Column
+layout = Layout()
+layout.split_column(
+    Layout(name="header", size=5),
+    Layout(name="body")
+)
+layout["body"].split_row(
+    Layout(name="left"),
+    Layout(name="right")
+)
+layout["header"].update(Panel(global_progress, title="🌟 TRẠNG THÁI TỔNG THỂ (GLOBAL)", border_style="blue"))
+layout["left"].update(Panel(thread_progress, title="⚙️ TIẾN ĐỘ THREADS (WORKERS)", border_style="green"))
+layout["right"].update(Panel(key_progress, title="🔑 API KEY COOLDOWN", border_style="yellow"))
 
 # ==========================================
 # 1. API KEY MANAGER & VALIDATOR
 # ==========================================
 def validate_and_load_keys():
-    print("🔍 Loading and verifying API Keys from .env file...\n")
+    console.print("🔍 [bold cyan]Loading API Keys from .env file...[/]")
     env_dict = dotenv_values(".env")
     
     all_keys = [(k, str(v).strip()) for k, v in env_dict.items() if v and str(v).strip()]
     
     if not all_keys:
-        print("❌ CRITICAL ERROR: No API Keys found in .env file!")
+        console.print("❌ [bold red]CRITICAL ERROR: No API Keys found in .env file![/]")
         sys.exit(1)
         
-    alive_keys = []
-    dead_keys = []
+    console.print(f"✅ [bold green]Loaded {len(all_keys)} keys (Skipped API validation to save quota).[/]")
     
-    for idx, (var_name, key) in enumerate(all_keys, 1):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={key}"
-        payload = {"contents": [{"parts": [{"text": "hi"}]}]}
+    ans = console.input(f"\n❓ [bold cyan]Continue with {len(all_keys)} active keys? (yes/no): [/]")
+    if ans.lower() not in ['y', 'yes']:
+        console.print("👋 Exited program.")
+        sys.exit(0)
         
-        try:
-            res = requests.post(url, json=payload, timeout=10)
-            if res.status_code in [200, 429]:
-                alive_keys.append(key)
-            else:
-                dead_keys.append((var_name, res.status_code))
-        except Exception:
-            dead_keys.append((var_name, "Connection Error"))
-
-    if dead_keys:
-        print("⚠️ DEAD API KEYS DETECTED:")
-        for var_name, err in dead_keys:
-            print(f"   -> [{var_name}] failed | Error: {err}")
-            
-        if not alive_keys:
-            print("\n❌ All API Keys are dead. Please update your .env file!")
-            sys.exit(1)
-            
-        ans = input(f"\n❓ Continue with {len(alive_keys)} active keys? (yes/no): ")
-        if ans.lower() not in ['y', 'yes']:
-            print("👋 Exited program.")
-            sys.exit(0)
-    else:
-        print(f"✅ Awesome! All {len(all_keys)} keys are active and ready.")
-        
-    print("\n" + "="*50)
-    return alive_keys
+    console.print("="*50 + "\n")
+    return all_keys
 
 API_KEYS = validate_and_load_keys()
 
 class KeyManager:
-    def __init__(self, keys):
-        self.keys = keys
-        self.idx = 0
+    def __init__(self, keys_info):
+        self.keys_info = keys_info 
         self.lock = threading.Lock()
+        
+        # Nhịp độ trung bình hiện tại (EMA - Baseline)
+        self.current_cd = {var_name: float(API_KEY_COOLDOWN) for var_name, _ in keys_info}
+        self.cooldown_until = {var_name: 0.0 for var_name, _ in keys_info}
+        
+        self.last_success_time = {var_name: 0.0 for var_name, _ in keys_info}
+        self.stats = {var_name: {'total': 0, 'success': 0} for var_name, _ in keys_info}
+        
+        # BỘ ĐẾM ÁN PHẠT: Đếm số lần dính 429 liên tiếp
+        self.consecutive_429 = {var_name: 0 for var_name, _ in keys_info}
+
+        # Thêm biến lưu trữ Rate Limits và token usage
+        self.rate_limits = {var_name: {'remaining': '?', 'limit': '?', 'tokens': 'N/A'} for var_name, _ in keys_info}
+
+        self.key_tasks = {}
+        for var_name, _ in keys_info:
+            self.key_tasks[var_name] = key_progress.add_task(
+                var_name, 
+                total=self.current_cd[var_name], 
+                status="[green]Ready", 
+                stats="[cyan][0/0]",
+                avg_cd=f"CD: {self.current_cd[var_name]:.1f}s",
+                quota="[dim]RPM: N/A | Tkn: N/A[/]"  # 🟢 Khởi tạo giá trị ban đầu cho UI
+            )
         
     def get_next_key(self):
         with self.lock:
-            key = self.keys[self.idx]
-            masked_key = f"...{key[-4:]}" if len(key) > 4 else "UNKNOWN"
-            self.idx = (self.idx + 1) % len(self.keys)
-            return key, masked_key
+            current_time = time.time()
+            selected_var, selected_key = None, None
+            shortest_wait = float('inf')
 
+            for var_name, key in self.keys_info:
+                wait_time = max(0.0, self.cooldown_until[var_name] - current_time)
+                if wait_time < shortest_wait:
+                    shortest_wait = wait_time
+                    selected_var = var_name
+                    selected_key = key
+
+            # Tạm khóa Key bằng nhịp độ trung bình (để các thread khác không vồ lấy)
+            self.cooldown_until[selected_var] = current_time + shortest_wait + self.current_cd[selected_var]
+
+        if shortest_wait > 0:
+            time.sleep(shortest_wait)
+
+        return selected_var, selected_key
+
+    def record_success(self, var_name, duration):
+        with self.lock:
+            current_time = time.time()
+            self.stats[var_name]['success'] += 1
+            
+            # 1. Xóa "án tích" vì đã thành công
+            self.consecutive_429[var_name] = 0 
+            
+            # 2. Tính toán nhịp độ (EMA) DỰA TRÊN LẦN THỬ THÀNH CÔNG
+            # Bỏ qua thời gian kẹt do lỗi, chỉ lấy tốc độ phản hồi thực tế của AI
+            # Chặn trần ở mức 60s để tránh nhiễu do mạng giật lag đột xuất
+            safe_duration = min(duration, 60.0)
+            self.current_cd[var_name] = (self.current_cd[var_name] * 0.7) + (safe_duration * 0.3)
+                
+            self.last_success_time[var_name] = current_time
+
+    def penalize_key(self, var_name):
+        with self.lock:
+            # 1. Tăng án tích
+            self.consecutive_429[var_name] += 1
+            
+            # 2. Tính thời gian phạt: 5s -> 10s -> 20s -> 40s (Tối đa 60s)
+            backoff_time = min(60.0, 5.0 * (2 ** (self.consecutive_429[var_name] - 1)))
+            
+            # 3. Ép chờ theo án phạt (Không làm hỏng nhịp độ trung bình EMA)
+            self.cooldown_until[var_name] = time.time() + backoff_time
+
+    def record_attempt(self, var_name):
+        with self.lock: 
+            self.stats[var_name]['total'] += 1
+
+    def update_ui(self):
+        current_time = time.time()
+        for var_name, _ in self.keys_info:
+            task_id = self.key_tasks[var_name]
+            
+            if self.consecutive_429[var_name] > 0:
+                current_active_cd = min(60.0, 5.0 * (2 ** (self.consecutive_429[var_name] - 1)))
+            else:
+                current_active_cd = self.current_cd[var_name]
+                
+            remaining = self.cooldown_until[var_name] - current_time
+            
+            s = self.stats[var_name]['success']
+            t = self.stats[var_name]['total']
+            stats_str = f"[bold cyan][{s}/{t}][/]"
+            
+            # Đổi nhãn thành "Avg" (Trung bình) để biết đây là thông số động đã được fix
+            avg_str = f"[magenta]Avg: {self.current_cd[var_name]:.1f}s[/]"
+            
+            # 🟢 Tạo chuỗi hiển thị Quota và token usage
+            rem = self.rate_limits[var_name]['remaining']
+            lim = self.rate_limits[var_name]['limit']
+            tkn = self.rate_limits[var_name].get('tokens', 'N/A')
+            if rem != '?':
+                quota_str = f"[bold blue]RPM: {rem}/{lim}[/]"
+            else:
+                quota_str = "[dim]RPM: N/A[/]"
+            if tkn != 'N/A':
+                quota_str += f" [yellow]| Tkn: {tkn}[/]"
+            
+            if remaining > 0:
+                display_rem = min(remaining, current_active_cd) if current_active_cd > 0 else remaining
+                completed = current_active_cd - display_rem
+                
+                if self.consecutive_429[var_name] > 0:
+                    status_text = f"[bold red]Banned {remaining:.1f}s"
+                else:
+                    status_text = f"[red]Wait {remaining:.1f}s"
+                
+                key_progress.update(task_id, total=current_active_cd, completed=completed, 
+                                   status=status_text, 
+                                   stats=stats_str, avg_cd=avg_str, quota=quota_str) # 🟢 Thêm quota
+            else:
+                key_progress.update(task_id, total=self.current_cd[var_name], completed=self.current_cd[var_name], 
+                                   status="[green]Ready", 
+                                   stats=stats_str, avg_cd=avg_str, quota=quota_str) # 🟢 Thêm quota
 key_pool = KeyManager(API_KEYS)
 
 # ==========================================
@@ -95,7 +240,7 @@ file_write_lock = threading.Lock()
 def load_checkpoint(output_csv):
     existing_data = {}
     if os.path.exists(output_csv):
-        print(f"📂 Found existing checkpoint: '{os.path.basename(output_csv)}'. Verifying data integrity...")
+        console.print(f"📂 Found existing checkpoint: '{os.path.basename(output_csv)}'. Verifying data integrity...")
         try:
             df_existing = pd.read_csv(output_csv)
             
@@ -120,9 +265,9 @@ def load_checkpoint(output_csv):
                     existing_data[word] = row.to_dict()
                     valid_count += 1
                     
-            print(f"✅ Recovered {valid_count} perfectly processed words. Skipping them!\n")
+            console.print(f"✅ Recovered {valid_count} perfectly processed words. Skipping them!\n")
         except Exception as e:
-            print(f"⚠️ Failed to read checkpoint ({e}). Starting fresh.\n")
+            console.print(f"⚠️ [bold yellow]Failed to read checkpoint ({e}). Starting fresh.[/]\n")
             
     return existing_data
 
@@ -135,7 +280,7 @@ def save_progress(current_results, output_csv):
 # ==========================================
 # 3. GEMINI API CALLER & VALIDATION
 # ==========================================
-def call_gemini_api(prompt, api_key):
+def call_gemini_api_raw(prompt, api_key):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     payload = {
@@ -148,7 +293,17 @@ def call_gemini_api(prompt, api_key):
     
     data = response.json()
     raw_text = data['candidates'][0]['content']['parts'][0]['text']
-    return json.loads(raw_text)
+    
+    # 🟢 Đọc HTTP Headers. Các nền tảng khác nhau dùng tên biến khác nhau.
+    # Ta hứng cả quota/RPM và token usage nếu Gemini trả về.
+    resp_headers = {k.lower(): v for k, v in response.headers.items()}
+    rate_limit_info = {
+        'remaining': resp_headers.get('x-ratelimit-remaining-requests', resp_headers.get('x-ratelimit-remaining', 'N/A')),
+        'limit': resp_headers.get('x-ratelimit-limit-requests', resp_headers.get('x-ratelimit-limit', 'N/A')),
+        'tokens': resp_headers.get('x-request-cost', resp_headers.get('x-request-cost-usage', resp_headers.get('x-response-usage', 'N/A')))
+    }
+    
+    return raw_text.strip(), rate_limit_info # 🟢 Trả về 2 giá trị
 
 def is_valid_ai_result(res_dict):
     required_keys = ["english_definition", "part_of_speech", "example_front", "example_back", "example_vietnamese_translation"]
@@ -161,7 +316,7 @@ def is_valid_ai_result(res_dict):
             return False
     return True
 
-def enrich_chunk_with_multi_keys(chunk, thread_id):
+def enrich_chunk_with_multi_keys(chunk, thread_task_id):
     accumulated_results = {}
     attempt = 0
     
@@ -169,8 +324,8 @@ def enrich_chunk_with_multi_keys(chunk, thread_id):
         attempt += 1
         missing_items = [item for item in chunk if item['word'].strip().lower() not in accumulated_results]
         
-        if attempt > 1 and attempt % 3 == 0:
-            tqdm.write(f"🔄 [Thread {thread_id}] Retry #{attempt} - Forcing AI to fix {len(missing_items)} incomplete words...")
+        if attempt > 1:
+            thread_progress.update(thread_task_id, status=f"[yellow]Retry #{attempt} (Fixing {len(missing_items)})[/]")
             
         input_data = [{"word": item['word'], "meaning": item['meaning'], "example": item['example']} for item in missing_items]
         
@@ -182,20 +337,37 @@ def enrich_chunk_with_multi_keys(chunk, thread_id):
         1. NO EMPTY FIELDS: You MUST provide comprehensive text for EVERY field for EVERY word. 
         2. IF "example" IS EMPTY in the input, YOU MUST INVENT a meaningful example sentence.
         3. "example_front": Must be a full sentence. Replace ONLY the exact target word with "_____".
-           - Right: "The waiter arrived to _____ our water glasses."
         4. "example_back": Must be the exact same sentence with the word included.
-           - Right: "The waiter arrived to replenish our water glasses."
         5. DO NOT use Anki cloze format like "{{{{c1::word}}}}". Never do this.
 
         Respond ONLY with a JSON array of objects. Keys required exactly as follows:
         "word", "english_definition", "part_of_speech", "example_front", "example_back", "example_vietnamese_translation".
         """
         
-        current_key, masked_key = key_pool.get_next_key()
+        var_name, current_key = key_pool.get_next_key()
+        key_pool.record_attempt(var_name)
         
         try:
-            results_list = call_gemini_api(prompt, current_key)
+            # 1. BẮM ĐẦU BÊN API THUẦN TÚY
+            start_api_time = time.time()
+            raw_text = call_gemini_api_raw(prompt, current_key)
+            api_duration = time.time() - start_api_time # Chỉ tính thời gian của lần này
             
+            # --- CHỐT THÀNH CÔNG NGAY TẠI ĐÂY ---
+            # Truyền api_duration vào để tính trung bình
+            key_pool.record_success(var_name, api_duration)
+            
+            # 2. XỬ LÝ DATA (Nếu có lỗi parse JSON ở đây thì API vẫn đã được tính là gọi thành công)
+            if raw_text.startswith("```json"):
+                raw_text = raw_text[7:]
+            elif raw_text.startswith("```"):
+                raw_text = raw_text[3:]
+            if raw_text.endswith("```"):
+                raw_text = raw_text[:-3]
+                
+            results_list = json.loads(raw_text.strip())
+            
+            # 3. VALIDATE VÀ LƯU KẾT QUẢ
             for res in results_list:
                 w_key = res.get("word", "").strip().lower()
                 if w_key in [m['word'].strip().lower() for m in missing_items]:
@@ -206,48 +378,74 @@ def enrich_chunk_with_multi_keys(chunk, thread_id):
                 time.sleep(1) 
                 
         except requests.exceptions.HTTPError as err:
-            if err.response.status_code == 429:
-                tqdm.write(f"⚠️ [Thread {thread_id}] Key ({masked_key}) Rate Limited. Rotating key...")
-                time.sleep(1) 
+            status_code = err.response.status_code
+            if status_code == 429:
+                thread_progress.update(thread_task_id, status="[red]Rate Limited! Penalty active[/]")
+                # Phạt lỗi Rate Limit (Backoff)
+                key_pool.penalize_key(var_name)
             else:
-                time.sleep(2)
-        except Exception:
+                try:
+                    error_msg = err.response.json().get('error', {}).get('message', 'Unknown Error')
+                except:
+                    error_msg = str(err)
+                thread_progress.update(thread_task_id, status=f"[bold red]API Error {status_code}: {error_msg[:30]}...[/]")
+            time.sleep(2) 
+        except json.decoder.JSONDecodeError:
+            # Bắt riêng lỗi parse JSON để dễ theo dõi
+            thread_progress.update(thread_task_id, status="[bold red]Lỗi Code: AI trả JSON sai định dạng![/]")
+            time.sleep(2)
+        except Exception as e:
+            thread_progress.update(thread_task_id, status=f"[bold red]Lỗi Code: {type(e).__name__}[/]")
             time.sleep(2)
 
     return accumulated_results
+# ==========================================
+# 4. WORKER THREAD MANAGER
+# ==========================================
+max_workers = len(API_KEYS)
+worker_tasks = []
+for i in range(max_workers):
+    worker_tasks.append(thread_progress.add_task(f"Thread {i+1}", total=CHUNK_SIZE, status="[dim]Idle"))
 
-# ==========================================
-# 4. WORKER THREAD
-# ==========================================
-def process_chunk(chunk_idx, chunk_items, position):
-    total_items = len(chunk_items)
-    with tqdm(total=total_items, desc=f"Thread {chunk_idx:>2}", position=position, leave=False, 
-              bar_format="{desc} |{bar}| {n_fmt}/{total_fmt} words") as pbar:
+available_workers = list(range(max_workers))
+worker_lock = threading.Lock()
+
+def process_chunk(chunk_items):
+    with worker_lock:
+        worker_id = available_workers.pop(0)
+        task_id = worker_tasks[worker_id]
         
-        ai_results_dict = enrich_chunk_with_multi_keys(chunk_items, chunk_idx)
-        processed = []
+    thread_progress.update(task_id, completed=0, total=len(chunk_items), status="[cyan]Processing AI...")
+
+    ai_results_dict = enrich_chunk_with_multi_keys(chunk_items, task_id)
+    
+    thread_progress.update(task_id, status="[cyan]Formatting...")
+    processed = []
+    for item in chunk_items:
+        word_key = item['word'].strip().lower()
+        ai_data = ai_results_dict.get(word_key, {
+            'english_definition': 'N/A', 'part_of_speech': 'N/A', 
+            'example_front': 'N/A', 'example_back': 'N/A', 'example_vietnamese_translation': 'N/A'
+        })
         
-        for item in chunk_items:
-            word_key = item['word'].strip().lower()
-            # Bảo vệ đề phòng AI quá lười sau MAX_RETRIES_AI
-            ai_data = ai_results_dict.get(word_key, {
-                'english_definition': 'N/A', 'part_of_speech': 'N/A', 
-                'example_front': 'N/A', 'example_back': 'N/A', 'example_vietnamese_translation': 'N/A'
-            })
-            
-            processed.append({
-                'index': item['index'],
-                'target_word': item['word'],
-                'ipa': item['ipa'],
-                'vietnamese_meaning': item['meaning'],
-                'english_definition': ai_data['english_definition'],
-                'part_of_speech': ai_data['part_of_speech'],
-                'example_front': ai_data['example_front'],
-                'example_back': ai_data['example_back'],
-                'example_vietnamese_translation': ai_data['example_vietnamese_translation']
-            })
+        processed.append({
+            'index': item['index'],
+            'target_word': item['word'],
+            'ipa': item['ipa'],
+            'vietnamese_meaning': item['meaning'],
+            'english_definition': ai_data['english_definition'],
+            'part_of_speech': ai_data['part_of_speech'],
+            'example_front': ai_data['example_front'],
+            'example_back': ai_data['example_back'],
+            'example_vietnamese_translation': ai_data['example_vietnamese_translation']
+        })
+        thread_progress.update(task_id, advance=1)
+    
+    thread_progress.update(task_id, status="[dim green]Done!")
+    
+    with worker_lock:
+        available_workers.append(worker_id)
         
-        pbar.update(total_items)
     return processed
 
 # ==========================================
@@ -289,45 +487,47 @@ def process_sheet(df, output_csv):
 
     total_missing = len(items_to_process)
     if total_missing == 0:
-        print("🎉 All words are already 100% completed in the CSV. Nothing left to do!")
+        console.print("🎉 [bold green]All words are already 100% completed in the CSV. Nothing left to do![/]")
         return all_results
 
-    # Lấy thông số từ phần Config
     chunks = [items_to_process[i:i + CHUNK_SIZE] for i in range(0, total_missing, CHUNK_SIZE)]
-    max_workers = len(API_KEYS) 
 
-    print(f"🚀 STARTING TURBO MODE: {max_workers} Workers processing {total_missing} missing words...")
-    print("="*50 + "\n")
-    
-    try:
-        with tqdm(total=total_missing, desc="GLOBAL PROGRESS", position=0, leave=True, 
-                  bar_format="{desc} |{bar}| {n_fmt}/{total_fmt} words [{elapsed}<{remaining}]") as pbar_global:
-            
+    console.print(f"🚀 [bold magenta]STARTING TURBO MODE: {max_workers} Workers processing {total_missing} missing words...[/]")
+    time.sleep(1)
+
+    with Live(layout, refresh_per_second=10):
+        global_progress.update(global_task_id, total=total_missing, visible=True)
+        
+        try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = []
-                for idx, chunk in enumerate(chunks):
-                    futures.append(executor.submit(process_chunk, idx + 1, chunk, idx + 1))
+                futures = [executor.submit(process_chunk, chunk) for chunk in chunks]
 
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        chunk_result = future.result()
-                        all_results.extend(chunk_result)
-                        pbar_global.update(len(chunk_result)) 
-                        
-                        save_progress(all_results, output_csv)
-                        
-                    except Exception as exc:
-                        tqdm.write(f"❌ Thread Error: {exc}")
+                while futures:
+                    key_pool.update_ui()
+                    
+                    done, not_done = concurrent.futures.wait(futures, timeout=0.1)
+                    for future in done:
+                        try:
+                            chunk_result = future.result()
+                            all_results.extend(chunk_result)
+                            global_progress.update(global_task_id, advance=len(chunk_result)) 
+                            save_progress(all_results, output_csv)
+                        except Exception as exc:
+                            pass
+                        finally:
+                            futures.remove(future)
 
-    except KeyboardInterrupt:
-        print("\n\n🛑 INTERRUPTED BY USER! The program was stopped manually.")
-        print(f"💾 Don't worry, all completed chunks have been safely saved to '{os.path.basename(output_csv)}'.")
-        print("Run the script again to resume from where you left off!\n")
+        except KeyboardInterrupt:
+            pass 
+
+    console.print("\n" + "="*50)
+    if len(all_results) < len(items_to_process):
+        console.print("🛑 [bold red]INTERRUPTED BY USER![/]")
+        console.print(f"💾 Completed chunks safely saved to '{os.path.basename(output_csv)}'.")
         sys.exit(0)
 
     all_results.sort(key=lambda x: x['index'])
     save_progress(all_results, output_csv) 
-    print("\n") 
     return all_results
 
 # ==========================================
@@ -347,9 +547,9 @@ def run_import(excel_file, sheet_name, output_csv):
         df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
         data = process_sheet(df, output_csv)
         if data:
-            print(f"🎉 100% COMPLETENESS ACHIEVED! Results successfully saved at '{output_csv}'.")
+            console.print(f"\n🎉 [bold green]100% COMPLETENESS ACHIEVED! Results successfully saved at '{output_csv}'.[/]")
     except Exception as e:
-        print(f"❌ System Error: {e}")
+        console.print(f"❌ [bold red]System Error: {e}[/]")
 
 if __name__ == "__main__":
     run_import(INPUT_EXCEL_FILE, SHEET_NAME, OUTPUT_CSV_FILE)
