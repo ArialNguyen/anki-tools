@@ -47,13 +47,15 @@ GEMINI_MODELS_CONFIG = {
     "gemma-3-12b-it":               {"RPM": 30, "TPM": 15000,  "RPD": 14400}
 }
 ### Giam ChunkSize de có best hiệu suất nhé
-CHUNK_SIZE = 1
-MAX_RETRIES_AI = 30       
+CHUNK_SIZE = 2
+MAX_RETRIES_AI = 5
 API_KEY_COOLDOWN = 5
 
 INPUT_EXCEL_FILE = "../Vocab_mountain_Writting.xlsm"
 SHEET_NAME = "Day 5"
-OUTPUT_CSV_FILE = "day5_turbo_absolute.csv"
+OUTPUT_CSV_FILE = "day5_anki.csv"
+
+OUTPUT_DIR = "exports"
 
 console = Console()
 
@@ -174,6 +176,13 @@ class KeyManager:
     def __init__(self, keys_info):
         self.keys_info = keys_info 
         self.lock = threading.Lock()
+
+        # --- ĐỊNH TUYẾN FILE TRACKER VÀO THƯ MỤC OUTPUT ---
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.output_folder = os.path.join(base_dir, OUTPUT_DIR)
+        os.makedirs(self.output_folder, exist_ok=True) # Tạo folder nếu chưa có
+        self.tracker_file = os.path.join(self.output_folder, "rpd_tracker.json")
+        # --------------------------------------------------
         
         # --- 1. SETUP MODEL QUOTA & JSON FILE THEO NGÀY ---
         self.today_str = datetime.datetime.now().strftime("%Y-%m-%d")
@@ -561,6 +570,10 @@ def enrich_chunk_with_multi_keys(chunk, thread_task_id):
 # 4. WORKER THREAD MANAGER
 # ==========================================
 max_workers = len(API_KEYS)
+
+failed_words = []
+failed_words_lock = threading.Lock()
+
 worker_tasks = []
 for i in range(max_workers):
     worker_tasks.append(thread_progress.add_task(f"Thread {i+1}", total=CHUNK_SIZE, status="[dim]Idle"))
@@ -580,6 +593,12 @@ def process_chunk(chunk_items):
     processed = []
     for item in chunk_items:
         word_key = item['word'].strip().lower()
+
+        if word_key not in ai_results_dict:
+            with failed_words_lock:
+                if item['word'] not in failed_words: # Tránh trùng lặp
+                    failed_words.append(item['word'])
+
         ai_data = ai_results_dict.get(word_key, {
             'english_definition': 'N/A', 'part_of_speech': 'N/A', 
             'example_front': 'N/A', 'example_back': 'N/A', 'example_vietnamese_translation': 'N/A'
@@ -685,6 +704,14 @@ def process_sheet(df, output_csv):
 
     all_results.sort(key=lambda x: x['index'])
     save_progress(all_results, output_csv) 
+
+    if failed_words:
+        console.print(f"\n⚠️ [bold yellow]CẢNH BÁO: CÓ {len(failed_words)} TỪ VỰNG AI KHÔNG THỂ XỬ LÝ (Đã gán N/A):[/]")
+        for fw in failed_words:
+            console.print(f"   [red]✖ {fw}[/]")
+    else:
+        console.print("\n✨ [bold green]Tuyệt vời! AI đã xử lý thành công 100% từ vựng, không có từ nào bị lỗi.[/]")
+
     return all_results
 
 # ==========================================
@@ -697,14 +724,22 @@ def run_import(excel_file, sheet_name, output_csv):
         excel_file = os.path.join(BASE_DIR, excel_file)
         if not os.path.exists(excel_file):
             excel_file = os.path.join(BASE_DIR, '..', excel_file)
-    if not os.path.isabs(output_csv):
-        output_csv = os.path.join(BASE_DIR, output_csv)
+            
+    export_dir = os.path.join(BASE_DIR, OUTPUT_DIR)
+    os.makedirs(export_dir, exist_ok=True)
+    
+    file_name = os.path.basename(output_csv)
+    final_output_path = os.path.join(export_dir, file_name)
+    # -----------------------------------------
 
     try:
         df = pd.read_excel(excel_file, sheet_name=sheet_name, header=None)
-        data = process_sheet(df, output_csv)
+        
+        # Ép dùng final_output_path
+        data = process_sheet(df, final_output_path) 
+        
         if data:
-            console.print(f"\n🎉 [bold green]100% COMPLETENESS ACHIEVED! Results successfully saved at '{output_csv}'.[/]")
+            console.print(f"\n🎉 [bold green]100% COMPLETENESS ACHIEVED! Results successfully saved at '{final_output_path}'.[/]")
     except Exception as e:
         console.print(f"❌ [bold red]System Error: {e}[/]")
 

@@ -1,0 +1,50 @@
+
+# Environments
+.env
+.venv
+venv/
+ENV/
+env.bak/
+
+# Tệp cấu hình cục bộ (Tùy chọn nếu không muốn đẩy config lên)
+config.json 
+
+# Thư mục xuất file & Checkpoint theo dõi Quota
+exports/
+*.csv
+rpd_tracker.json
+
+# Excel Input (Tránh đẩy dữ liệu cá nhân lên Git)
+*.xlsx
+*.xlsm
+*.xls
+
+# Python Cache & Build
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# OS Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
